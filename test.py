@@ -4,16 +4,7 @@ import time
 import cv2
 import matplotlib.pyplot as plt
 
-# Useful Constants
-LABELS = [
-    "JUMPING",
-    "JUMPING_JACKS",
-    "BOXING",
-    "WAVING_2HANDS",
-    "WAVING_1HAND",
-    "CLAPPING_HANDS"
-]
-
+# Dataset paths
 DATASET_PATH = "data/HAR_pose_activities/database/"
 X_train_path = DATASET_PATH + "X_train.txt"
 X_test_path = DATASET_PATH + "X_test.txt"
@@ -36,21 +27,27 @@ def load_y(y_path):
         y_ = np.array([elem for elem in [row.replace('  ', ' ').strip().split(' ') for row in file]], dtype=np.int32)
     return y_ - 1  # for 0-based indexing
 
+# Load labels dynamically from the training set
+def load_labels(y_path):
+    with open(y_path, 'r') as file:
+        labels = [row.strip() for row in file.readlines()]
+    return sorted(set(labels))  # return unique sorted labels
+
+# Load training and testing data
 X_train = load_X(X_train_path)
 X_test = load_X(X_test_path)
 y_train = load_y(y_train_path)
 y_test = load_y(y_test_path)
 
-# Ensure labels are of correct shape
-y_train = np.squeeze(y_train)  # Remove unnecessary dimensions
-y_test = np.squeeze(y_test)    # Remove unnecessary dimensions
+# Dynamically load the labels
+LABELS = load_labels(DATASET_PATH + "Y_train.txt")
 
-# Input Data
+# Input data dimensions
 training_data_count = len(X_train)
 test_data_count = len(X_test)
 n_input = len(X_train[0][0])  # num input parameters per timestep
 n_hidden = 34  # Hidden layer num of features
-n_classes = 6
+n_classes = len(LABELS)
 
 # Learning rate settings
 init_learning_rate = 0.005
@@ -130,6 +127,9 @@ def preprocess_frame(frame):
     frame_resized = np.expand_dims(frame_resized, axis=0)  # Add batch dimension
     return frame_resized / 255.0  # Normalize if needed
 
+# Store recognized actions
+recognized_actions = []
+
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -142,8 +142,16 @@ while True:
     prediction = model.predict(input_data)
     predicted_class = np.argmax(prediction)
 
+    # Check if the predicted class exists in the dataset labels
+    if predicted_class >= len(LABELS):  # if the class is outside the defined label range
+        label = "Unknown action"
+    else:
+        label = LABELS[predicted_class]
+
+    # Record the action
+    recognized_actions.append(label)
+
     # Display the predicted action on the frame
-    label = LABELS[predicted_class]
     cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
 
     # Show the frame with prediction
@@ -155,9 +163,21 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
-X_test = X_test.reshape(-1, n_steps, n_input)
 
-# Perform prediction
+# Plot the recognized actions at the end
+action_counts = {action: recognized_actions.count(action) for action in set(recognized_actions)}
+actions, counts = zip(*action_counts.items())
+
+plt.bar(actions, counts)
+plt.xlabel("Actions")
+plt.ylabel("Count")
+plt.title("Recognized Actions During Webcam Feed")
+plt.xticks(rotation=45, ha="right")
+plt.tight_layout()
+plt.show()
+
+# Evaluate model performance on test set
+X_test = X_test.reshape(-1, n_steps, n_input)
 predictions = model.predict(X_test)
 
 # Process prediction output
