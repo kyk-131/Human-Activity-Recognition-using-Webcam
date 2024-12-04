@@ -1,215 +1,156 @@
+import os
+import cv2
 import numpy as np
 import tensorflow as tf
-import time
-import cv2
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from collections import Counter
 import matplotlib.pyplot as plt
 
-# Dataset paths
-DATASET_PATH = "data/HAR_pose_activities/database/"
-X_train_path = DATASET_PATH + "X_train.txt"
-X_test_path = DATASET_PATH + "X_test.txt"
-y_train_path = DATASET_PATH + "Y_train.txt"
-y_test_path = DATASET_PATH + "Y_test.txt"
+# Set the dataset path
+DATASET_PATH = r"C:\Users\latha\Human-Activity-Recognition-using-Webcam\data\UCF-101"
+n_steps = 32  # Sequence length
 
-n_steps = 32  # 32 timesteps per series
+# Load and preprocess the UCF101 dataset
+def load_ucf101_data(dataset_path):
+    """
+    Load video data and corresponding labels from the UCF101 dataset.
 
-# Load the networks inputs
-def load_X(X_path):
-    with open(X_path, 'r') as file:
-        X_ = np.array([elem for elem in [row.split(',') for row in file]], dtype=np.float32)
-    blocks = int(len(X_) / n_steps)
-    X_ = np.array(np.split(X_, blocks))
-    return X_
+    Args:
+        dataset_path (str): Path to the UCF101 dataset.
 
-# Load the networks outputs
-def load_y(y_path):
-    with open(y_path, 'r') as file:
-        y_ = np.array([elem for elem in [row.replace('  ', ' ').strip().split(' ') for row in file]], dtype=np.int32)
-    return y_ - 1  # for 0-based indexing
+    Returns:
+        np.ndarray: Processed video data.
+        np.ndarray: Corresponding labels.
+    """
+    video_data = []
+    labels = []
 
-# Load labels dynamically from the training set
-def load_labels(y_path):
-    with open(y_path, 'r') as file:
-        labels = [row.strip() for row in file.readlines()]
-    return sorted(set(labels))  # return unique sorted labels
+    # Check if the dataset path exists
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"Dataset path {dataset_path} does not exist.")
 
-# Load training and testing data
-X_train = load_X(X_train_path)
-X_test = load_X(X_test_path)
-y_train = load_y(y_train_path)
-y_test = load_y(y_test_path)
+    # Iterate through class directories
+    classes = os.listdir(dataset_path)
+    for class_name in classes:
+        class_path = os.path.join(dataset_path, class_name)
+        if not os.path.isdir(class_path):
+            continue  # Skip non-directory files
 
-# Dynamically load the labels
-LABELS = load_labels(DATASET_PATH + "Y_train.txt")
+        for video_file in os.listdir(class_path):
+            if not video_file.endswith(('.avi', '.mp4')):  # Filter video files
+                continue
 
-# Input data dimensions
-training_data_count = len(X_train)
-test_data_count = len(X_test)
-n_input = len(X_train[0][0])  # num input parameters per timestep
-n_hidden = 34  # Hidden layer num of features
-n_classes = len(LABELS)
+            video_path = os.path.join(class_path, video_file)
+            try:
+                # Extract frames from the video
+                frames = extract_frames(video_path)
+                if len(frames) >= n_steps:
+                    video_data.append(frames[:n_steps])  # Trim to n_steps
+                    labels.append(class_name)
+                else:
+                    print(f"Skipping {video_file}: Not enough frames.")
+            except Exception as e:
+                print(f"Error processing {video_file}: {e}")
 
-# Learning rate settings
-init_learning_rate = 0.005
-decay_rate = 0.96
-decay_steps = 100000
+    return np.array(video_data), np.array(labels)
 
-lambda_loss_amount = 0.0015
-training_iters = training_data_count * 300  # Loop 300 times on the dataset, i.e., 300 epochs
-batch_size = 512
 
-# One hot encoding function
-def one_hot(y_):
-    return tf.one_hot(y_, depth=n_classes)
+# Extract frames from a video
+def extract_frames(video_path):
+    cap = cv2.VideoCapture(video_path)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.resize(frame, (64, 64))  # Resize frames
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+        frames.append(frame)
+    cap.release()
+    return np.array(frames)
 
-# Dataset preparation
-train_dataset = tf.data.Dataset.from_tensor_slices((X_train, one_hot(y_train)))
-train_dataset = train_dataset.batch(batch_size).repeat()  # Add repeat() to ensure infinite dataset
+# Load data
+print("Loading dataset...")
+X, y = load_ucf101_data(DATASET_PATH)
 
-test_dataset = tf.data.Dataset.from_tensor_slices((X_test, one_hot(y_test)))
-test_dataset = test_dataset.batch(batch_size)
+# Encode labels
+label_encoder = LabelEncoder()
+y_encoded = label_encoder.fit_transform(y)
+y_one_hot = tf.keras.utils.to_categorical(y_encoded)
 
-# Define Custom LSTM Layer using tf.keras.layers
-class CustomLSTMLayer(tf.keras.layers.Layer):
-    def __init__(self, n_hidden, n_classes):
-        super(CustomLSTMLayer, self).__init__()
-        self.n_hidden = n_hidden
-        self.out_dense = tf.keras.layers.Dense(n_classes)
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X, y_one_hot, test_size=0.2, random_state=42)
 
-        # Initialize the LSTM cells only once, not in the call method
-        self.lstm_cells = [tf.keras.layers.LSTMCell(self.n_hidden) for _ in range(2)]  # 2 LSTM layers
-        self.lstm_layer = tf.keras.layers.RNN(tf.keras.layers.StackedRNNCells(self.lstm_cells), return_sequences=True)
+# Normalize and reshape data
+X_train = X_train / 255.0  # Normalize
+X_test = X_test / 255.0
+X_train = X_train.reshape(-1, n_steps, 64, 64, 1)
+X_test = X_test.reshape(-1, n_steps, 64, 64, 1)
 
-    def call(self, inputs):
-        lstm_output = self.lstm_layer(inputs)
-        pooled_output = tf.keras.layers.GlobalAveragePooling1D()(lstm_output)
-        return self.out_dense(pooled_output)
+# Define the LSTM-CNN model
+model = tf.keras.Sequential([
+    tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(32, (3, 3), activation='relu'), input_shape=(n_steps, 64, 64, 1)),
+    tf.keras.layers.TimeDistributed(tf.keras.layers.MaxPooling2D((2, 2))),
+    tf.keras.layers.TimeDistributed(tf.keras.layers.Flatten()),
+    tf.keras.layers.LSTM(128, return_sequences=True),
+    tf.keras.layers.LSTM(64),
+    tf.keras.layers.Dense(len(label_encoder.classes_), activation='softmax')
+])
 
-# Define input tensor shape for model
-X_input = tf.keras.Input(shape=(n_steps, n_input), dtype=tf.float32, name="X_input")
-y_input = tf.keras.Input(shape=(n_classes,), dtype=tf.float32, name="y_input")
-
-# Apply the LSTM network
-lstm_layer = CustomLSTMLayer(n_hidden=n_hidden, n_classes=n_classes)
-pred = lstm_layer(X_input)  # Output predictions from the LSTM network
-
-# Define the model using the functional API
-model = tf.keras.Model(inputs=X_input, outputs=pred)
-
-# Learning rate settings and optimizer
-learning_rate = tf.keras.optimizers.schedules.ExponentialDecay(init_learning_rate, decay_steps, decay_rate, staircase=True)
-optimizer = tf.keras.optimizers.Adam(learning_rate)
-
-# Compile model with optimizer and loss function
-model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
-
-# Time tracking for training
-time_start = time.time()
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
 # Train the model
-model.fit(train_dataset, epochs=30, steps_per_epoch=training_data_count // batch_size)
+batch_size = 4
+num_epochs = 5
 
-# After training, evaluate on the test set
-final_loss, final_acc = model.evaluate(test_dataset, batch_size=batch_size)
-print(f"FINAL TEST RESULTS: Loss = {final_loss:.6f}, Accuracy = {final_acc:.6f}")
+print("Training the model...")
+model.fit(X_train, y_train, batch_size=batch_size, epochs=num_epochs, validation_data=(X_test, y_test))
 
-# Real-time video action recognition
-cap = cv2.VideoCapture(0)  # Start webcam
+# Evaluate the model
+print("Evaluating the model...")
+test_loss, test_accuracy = model.evaluate(X_test, y_test)
+print(f"Test Accuracy: {test_accuracy * 100:.2f}%")
 
-# Preprocessing function for the webcam frame
-def preprocess_frame(frame):
-    # Convert frame to grayscale
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    # Resize frame to match the input dimensions (32x36 in this case)
-    frame_resized = cv2.resize(frame_gray, (36, 32))
-    # Ensure correct dimensions
-    frame_resized = np.expand_dims(frame_resized, axis=-1)  # Add channel dimension
-    frame_resized = np.expand_dims(frame_resized, axis=0)  # Add batch dimension
-    return frame_resized / 255.0  # Normalize if needed
-
-# Store recognized actions
+# Real-time action recognition
+cap = cv2.VideoCapture(0)  # Webcam input
 recognized_actions = []
 
+def preprocess_frame(frame):
+    frame = cv2.resize(frame, (64, 64))
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    frame = frame / 255.0  # Normalize
+    return frame.reshape(1, 1, 64, 64, 1)  # Shape for the model
+
+print("Starting real-time recognition...")
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Preprocess the frame for action recognition
     input_data = preprocess_frame(frame)
-
-    # Predict the action
     prediction = model.predict(input_data)
-    predicted_class = np.argmax(prediction)
+    predicted_class = np.argmax(prediction, axis=1)[0]
+    action_label = label_encoder.inverse_transform([predicted_class])[0]
 
-    # Check if the predicted class exists in the dataset labels
-    if predicted_class >= len(LABELS):  # if the class is outside the defined label range
-        label = "Unknown action"
-    else:
-        label = LABELS[predicted_class]
+    recognized_actions.append(action_label)
 
-    # Record the action
-    recognized_actions.append(label)
+    cv2.putText(frame, action_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.imshow("Real-Time Action Recognition", frame)
 
-    # Display the predicted action on the frame
-    cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
-
-    # Show the frame with prediction
-    cv2.imshow('Action Recognition', frame)
-
-    # Exit the video window on pressing 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(1) & 0xFF == ord('q'):  # Quit on 'q' key press
         break
 
 cap.release()
 cv2.destroyAllWindows()
 
-# Plot the recognized actions at the end
-action_counts = {action: recognized_actions.count(action) for action in set(recognized_actions)}
-actions, counts = zip(*action_counts.items())
-
-plt.bar(actions, counts)
+# Visualize recognized actions
+action_counts = Counter(recognized_actions)
+plt.figure(figsize=(10, 6))
+plt.bar(action_counts.keys(), action_counts.values(), color='skyblue')
+plt.title("Actions Recognized During Webcam Session")
 plt.xlabel("Actions")
-plt.ylabel("Count")
-plt.title("Recognized Actions During Webcam Feed")
-plt.xticks(rotation=45, ha="right")
+plt.ylabel("Frequency")
+plt.xticks(rotation=45)
 plt.tight_layout()
-plt.show()
-
-# Evaluate model performance on test set
-X_test = X_test.reshape(-1, n_steps, n_input)
-predictions = model.predict(X_test)
-
-# Process prediction output
-predictions_classes = np.argmax(predictions, axis=1)
-
-from sklearn import metrics
-print("Testing Accuracy: {}%".format(100 * final_acc))
-print("")
-print("Precision: {}%".format(100 * metrics.precision_score(y_test, predictions_classes, average="weighted")))
-print("Recall: {}%".format(100 * metrics.recall_score(y_test, predictions_classes, average="weighted")))
-print("f1_score: {}%".format(100 * metrics.f1_score(y_test, predictions_classes, average="weighted")))
-
-# Confusion Matrix
-print("")
-print("Confusion Matrix:")
-print("Created using test set of {} datapoints, normalised to % of each class in the test dataset".format(len(y_test)))
-confusion_matrix = metrics.confusion_matrix(y_test, predictions_classes)
-
-# Normalizing the confusion matrix
-normalised_confusion_matrix = np.array(confusion_matrix, dtype=np.float32) / np.sum(confusion_matrix) * 100
-
-# Plot Results: 
-width = 12
-height = 12
-plt.figure(figsize=(width, height))
-plt.imshow(normalised_confusion_matrix, interpolation='nearest', cmap=plt.cm.Blues)
-plt.title("Confusion matrix \n(normalised to % of total test data)")
-plt.colorbar()
-tick_marks = np.arange(n_classes)
-plt.xticks(tick_marks, LABELS, rotation=90)
-plt.yticks(tick_marks, LABELS)
-plt.tight_layout()
-plt.ylabel('True label')
-plt.xlabel('Predicted label')
 plt.show()
