@@ -4,59 +4,45 @@ import numpy as np
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from collections import Counter
+from keras.utils import to_categorical
 import matplotlib.pyplot as plt
+from collections import Counter
 
-# Set the dataset path
-DATASET_PATH = r"C:\Users\latha\Human-Activity-Recognition-using-Webcam\data\UCF-101"
-n_steps = 32  # Sequence length
+# Set dataset path
+DATASET_PATH = r"C:\Users\latha\Action_Recognition\data\WIS\video"  # Change this path to your dataset location
 
-# Load and preprocess the UCF101 dataset
-def load_ucf101_data(dataset_path):
-    """
-    Load video data and corresponding labels from the UCF101 dataset.
+# Parameters
+n_frames = 16  # Number of frames to use per video
+frame_size = (64, 64)  # Resize frames to 64x64
 
-    Args:
-        dataset_path (str): Path to the UCF101 dataset.
-
-    Returns:
-        np.ndarray: Processed video data.
-        np.ndarray: Corresponding labels.
-    """
+# Function to load and preprocess HMDB-51 dataset
+def load_hmdb51_data(dataset_path):
     video_data = []
     labels = []
-
-    # Check if the dataset path exists
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError(f"Dataset path {dataset_path} does not exist.")
-
-    # Iterate through class directories
     classes = os.listdir(dataset_path)
+    
     for class_name in classes:
         class_path = os.path.join(dataset_path, class_name)
         if not os.path.isdir(class_path):
-            continue  # Skip non-directory files
+            continue  # Skip if not a directory
 
         for video_file in os.listdir(class_path):
-            if not video_file.endswith(('.avi', '.mp4')):  # Filter video files
-                continue
-
-            video_path = os.path.join(class_path, video_file)
-            try:
-                # Extract frames from the video
+            if video_file.endswith('.avi'):  # Filter HMDB-51 video files
+                video_path = os.path.join(class_path, video_file)
                 frames = extract_frames(video_path)
-                if len(frames) >= n_steps:
-                    video_data.append(frames[:n_steps])  # Trim to n_steps
+                
+                # Ensure enough frames are available
+                if len(frames) >= n_frames:
+                    video_data.append(frames[:n_frames])  # Take first 'n_frames'
                     labels.append(class_name)
                 else:
                     print(f"Skipping {video_file}: Not enough frames.")
-            except Exception as e:
-                print(f"Error processing {video_file}: {e}")
-
+    
+    print(f"Loaded {len(video_data)} videos.")  # Check how many videos are loaded
+    print(f"Classes found: {set(labels)}")  # Check unique classes
     return np.array(video_data), np.array(labels)
 
-
-# Extract frames from a video
+# Function to extract frames from video
 def extract_frames(video_path):
     cap = cv2.VideoCapture(video_path)
     frames = []
@@ -64,33 +50,39 @@ def extract_frames(video_path):
         ret, frame = cap.read()
         if not ret:
             break
-        frame = cv2.resize(frame, (64, 64))  # Resize frames
+        frame = cv2.resize(frame, frame_size)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
         frames.append(frame)
     cap.release()
     return np.array(frames)
 
 # Load data
-print("Loading dataset...")
-X, y = load_ucf101_data(DATASET_PATH)
+print("Loading HMDB-51 dataset...")
+X, y = load_hmdb51_data(DATASET_PATH)
+
+# Check the first few labels to confirm loading
+print(f"Labels: {y[:10]}")  # Print the first 10 labels
 
 # Encode labels
 label_encoder = LabelEncoder()
 y_encoded = label_encoder.fit_transform(y)
-y_one_hot = tf.keras.utils.to_categorical(y_encoded)
+y_one_hot = to_categorical(y_encoded)
 
-# Split data
+# Check the unique classes in the labels
+print(f"Unique Classes: {len(set(y))}")
+
+# Split data into training and testing sets
 X_train, X_test, y_train, y_test = train_test_split(X, y_one_hot, test_size=0.2, random_state=42)
 
 # Normalize and reshape data
-X_train = X_train / 255.0  # Normalize
+X_train = X_train / 255.0
 X_test = X_test / 255.0
-X_train = X_train.reshape(-1, n_steps, 64, 64, 1)
-X_test = X_test.reshape(-1, n_steps, 64, 64, 1)
+X_train = X_train.reshape(-1, n_frames, 64, 64, 1)
+X_test = X_test.reshape(-1, n_frames, 64, 64, 1)
 
-# Define the LSTM-CNN model
+# Build a simple CNN-LSTM model
 model = tf.keras.Sequential([
-    tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(32, (3, 3), activation='relu'), input_shape=(n_steps, 64, 64, 1)),
+    tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(32, (3, 3), activation='relu'), input_shape=(n_frames, 64, 64, 1)),
     tf.keras.layers.TimeDistributed(tf.keras.layers.MaxPooling2D((2, 2))),
     tf.keras.layers.TimeDistributed(tf.keras.layers.Flatten()),
     tf.keras.layers.LSTM(128, return_sequences=True),
@@ -101,26 +93,25 @@ model = tf.keras.Sequential([
 model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
 # Train the model
-batch_size = 4
-num_epochs = 5
-
 print("Training the model...")
-model.fit(X_train, y_train, batch_size=batch_size, epochs=num_epochs, validation_data=(X_test, y_test))
+model.fit(X_train, y_train, batch_size=8, epochs=5, validation_data=(X_test, y_test))
 
 # Evaluate the model
 print("Evaluating the model...")
 test_loss, test_accuracy = model.evaluate(X_test, y_test)
 print(f"Test Accuracy: {test_accuracy * 100:.2f}%")
 
-# Real-time action recognition
-cap = cv2.VideoCapture(0)  # Webcam input
+# Real-time recognition (using webcam)
+cap = cv2.VideoCapture(0)
 recognized_actions = []
+
+frame_buffer = []  # Buffer to store frames for prediction
 
 def preprocess_frame(frame):
     frame = cv2.resize(frame, (64, 64))
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     frame = frame / 255.0  # Normalize
-    return frame.reshape(1, 1, 64, 64, 1)  # Shape for the model
+    return frame.reshape(64, 64, 1)
 
 print("Starting real-time recognition...")
 while True:
@@ -128,14 +119,31 @@ while True:
     if not ret:
         break
 
-    input_data = preprocess_frame(frame)
-    prediction = model.predict(input_data)
-    predicted_class = np.argmax(prediction, axis=1)[0]
-    action_label = label_encoder.inverse_transform([predicted_class])[0]
+    # Preprocess the frame
+    frame_processed = preprocess_frame(frame)
 
-    recognized_actions.append(action_label)
+    # Add the processed frame to the buffer
+    frame_buffer.append(frame_processed)
 
-    cv2.putText(frame, action_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    # If the buffer has 16 frames, make a prediction
+    if len(frame_buffer) == 16:
+        # Convert the buffer to the correct shape (1, 16, 64, 64, 1)
+        input_data = np.array(frame_buffer).reshape(1, 16, 64, 64, 1)
+        
+        # Predict the action
+        prediction = model.predict(input_data)
+        predicted_class = np.argmax(prediction, axis=1)[0]
+        action_label = label_encoder.inverse_transform([predicted_class])[0]
+
+        recognized_actions.append(action_label)
+
+        # Display the recognized action on the frame
+        cv2.putText(frame, action_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        # Clear the buffer after making the prediction
+        frame_buffer = []
+
+    # Display the frame with the action label
     cv2.imshow("Real-Time Action Recognition", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):  # Quit on 'q' key press
@@ -144,7 +152,9 @@ while True:
 cap.release()
 cv2.destroyAllWindows()
 
-# Visualize recognized actions
+# Plot recognized actions during webcam session
+print("Plotting recognized actions...")
+from collections import Counter
 action_counts = Counter(recognized_actions)
 plt.figure(figsize=(10, 6))
 plt.bar(action_counts.keys(), action_counts.values(), color='skyblue')
